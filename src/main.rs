@@ -2,7 +2,7 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use rocksdb::{DB, Options, DBCompactionStyle, Error};
+use rocksdb::{DB, Options, DBCompactionStyle, Error, IteratorMode};
 use warp::{Filter, Reply, reply};
 use serde_json::{Value, json};
 use warp::http::{StatusCode, Response};
@@ -65,12 +65,79 @@ impl Server {
         Ok(doc)
     }
 
-    async fn search_documents(&self) {
-        // Search documents logic goes here
-        panic!("Not implemented");
+    async fn search_documents(self: Arc<Self>, q: &String) -> Result<impl warp::Reply, warp::Rejection> {
+        let query = match parse_query(q) {
+            Ok(q) => q,
+            Err(e) => {
+                return Ok(warp::reply::with_status(
+                    format!("Invalid query: {}", e),
+                    StatusCode::BAD_REQUEST
+                ))
+            }
+        };
+
+        let mut documents = Vec::new();
+
+        for entry in self.docs.iterator(IteratorMode::Start) {
+            match entry {
+                Ok((key, value)) => {
+                    let document = match serde_json::from_slice(&value) {
+                        Ok(doc) => doc,
+                        Err(e) => {
+                            return Ok(warp::reply::with_status(
+                                format!("Error deserializing document: {:?}", e),
+                                StatusCode::INTERNAL_SERVER_ERROR
+                            ))
+                        }
+                    };
+
+                    if query.matches(&document) {
+                        documents.push(json!({
+                            "id": String::from_utf8(key.to_vec()).unwrap(),
+                            "body": document,
+                        }));
+                    }
+                }
+                Err(e) => {
+                    return Ok(warp::reply::with_status(
+                        format!("Database error: {:?}", e),
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    ))
+                }
+            }
+        }
+
+        let response = json!({
+            "documents": documents,
+            "count": documents.len(),
+        });
+        Ok(warp::reply::with_status(
+            response.to_string(),
+            StatusCode::OK
+        ))
     }
-    
 }
+
+
+fn get_path(doc: Value, parts: &[String]) -> Value {
+    let mut current = &doc;
+
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let value = current.get(part);
+        
+        if value.unwrap().is_object() {
+            current = value.unwrap();
+        } else {
+            break;
+        }
+    }
+    current.clone()
+}
+
 
 #[derive(Debug)]
 struct QueryCondition {
@@ -93,6 +160,37 @@ impl QueryCondition {
 struct Query {
     conditions: Vec<QueryCondition>,
 }
+
+impl Query {
+    fn matches(&self, doc: &Value) -> bool {
+        for condition in &self.conditions {
+            let value = get_path(doc.clone(), &condition.key.split(".").map(|s| s.to_string()).collect::<Vec<String>>());
+            if value.is_null() {
+                return false;
+            }
+            let matches = match &condition.op[..] {
+                "=" => value.as_str().unwrap() == &condition.value,
+                ">" => if value.is_number() {
+                    value.as_f64().unwrap() > condition.value.parse::<f64>().unwrap()
+                } else {
+                    return false;
+                }
+                "<" => if value.is_number() {
+                    value.as_f64().unwrap() < condition.value.parse::<f64>().unwrap()
+                } else {
+                    return false;
+                }
+                _ => panic!("Invalid operator"),
+            };
+            if !matches {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+
 
 fn lex_string(input: &str) -> Result<(&str, &str), &str> {
     let input = input.trim_start();
@@ -165,7 +263,17 @@ async fn main() {
         .and(warp::any().map(move || Arc::clone(&server_clone)))
         .and_then(|id, server: Arc<Server>| server.get_document(id));
 
-    let routes = add_document.or(get_document);
+    let server_clone = Arc::clone(&server);
+    let search_documents = warp::get()
+        .and(warp::path("docs"))
+        .and(warp::query::<HashMap<String, String>>())
+        .and(warp::any().map(move || Arc::clone(&server_clone)))
+        .and_then(|query: HashMap<String, String>, server: Arc<Server>| {
+            let q = query.get("q").unwrap_or(&"".to_string());
+            server.search_documents(q);
+        });
+
+    let routes = add_document.or(get_document).or(search_documents);
     println!("Listening on port {}", port);
     warp::serve(routes).run(([127, 0, 0, 1], 8080)).await;
 }
