@@ -1,4 +1,4 @@
-# RusticDB
+# eRusticDB
 
 ## What
 A toy document-oriented DB implemented in Rust.
