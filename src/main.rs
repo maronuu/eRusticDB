@@ -10,6 +10,7 @@ use warp::{reply, Filter};
 
 struct Server {
     docs: DB,
+    index_db: DB,
     port: String,
 }
 
@@ -17,15 +18,27 @@ impl Server {
     pub fn new(db_name: &str, port: &str) -> Result<Self, Error> {
         let db_path = Path::new(db_name);
         let docs = DB::open_default(db_path)?;
+        let index_path = db_path.with_extension("index");
+        let index_db = DB::open_default(index_path)?;
 
         Ok(Self {
             docs: docs,
+            index_db: index_db,
             port: port.to_string(),
         })
     }
-    async fn reindex(&self) {
-        // Reindexing logic goes here
-        panic!("Not implemented")
+
+    async fn index(self: Arc<Self>, db: &DB, id: String, document: Value) {
+        let path_values = get_path_values(&document, "".to_string());
+
+        for path_value in path_values {
+            let mut index_key = path_value.clone();
+            index_key.push_str(":");
+            index_key.push_str(&id);
+            let write_options = rocksdb::WriteOptions::default();
+            db.put_opt(index_key, "".to_string(), &write_options)
+                .unwrap();
+        }
     }
 
     async fn add_document(
@@ -33,10 +46,17 @@ impl Server {
         document: Value,
     ) -> Result<impl warp::Reply, warp::Rejection> {
         let id = Uuid::new_v4().to_string();
+        let server_clone = Arc::clone(&self);
+        // indexing
+        self.index(&server_clone.index_db, id.clone(), document.clone())
+            .await;
         let doc = serde_json::to_string(&document).unwrap();
         // write to db
         let write_options = rocksdb::WriteOptions::default();
-        self.docs.put_opt(id.clone(), doc, &write_options).unwrap();
+        server_clone
+            .docs
+            .put_opt(id.clone(), doc, &write_options)
+            .unwrap();
         // response
         let status = StatusCode::CREATED;
         let response = reply::json(&json!({ "id": id, "status": status.as_str()}));
@@ -87,31 +107,72 @@ impl Server {
 
         let mut documents = Vec::new();
 
-        for entry in self.docs.iterator(IteratorMode::Start) {
-            match entry {
-                Ok((key, value)) => {
-                    let document = match serde_json::from_slice(&value) {
-                        Ok(doc) => doc,
-                        Err(e) => {
-                            return Ok(warp::reply::with_status(
-                                format!("Error deserializing document: {:?}", e),
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                            ))
-                        }
-                    };
-
-                    if query.matches(&document) {
-                        documents.push(json!({
-                            "id": String::from_utf8(key.to_vec()).unwrap(),
-                            "body": document,
-                        }));
-                    }
+        // lookup index
+        let mut is_range = false;
+        let mut doc2cnt = HashMap::new();
+        let mut non_range_args = 0;
+        for cond in query.conditions.iter() {
+            if cond.op == "=".to_string() {
+                non_range_args += 1;
+                let index_key = cond.key.clone() + ":" + &cond.value;
+                let ids = self.index_db.get(index_key).unwrap();
+                let ids = String::from_utf8(ids.unwrap()).unwrap();
+                let ids: Vec<&str> = ids.split(":").collect();
+                let ids = ids.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+                for id in ids {
+                    let cnt = doc2cnt.entry(id).or_insert(0);
+                    *cnt += 1;
                 }
-                Err(e) => {
-                    return Ok(warp::reply::with_status(
-                        format!("Database error: {:?}", e),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    ))
+            } else {
+                is_range = true;
+            }
+        }
+
+        let mut ids_in_all = Vec::new();
+        for (id, cnt) in doc2cnt {
+            if cnt == non_range_args {
+                ids_in_all.push(id);
+            }
+        }
+
+        if ids_in_all.len() > 0 {
+            for id in ids_in_all {
+                let doc = self.get_document_by_id(id.clone()).unwrap();
+                let doc = json!(doc.clone());
+                if !is_range || query.matches(&doc) {
+                    documents.push(json!({
+                        "id": id,
+                        "body": doc,
+                    }));
+                }
+            }
+        } else {
+            for entry in self.docs.iterator(IteratorMode::Start) {
+                match entry {
+                    Ok((key, value)) => {
+                        let document = match serde_json::from_slice(&value) {
+                            Ok(doc) => doc,
+                            Err(e) => {
+                                return Ok(warp::reply::with_status(
+                                    format!("Error deserializing document: {:?}", e),
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                ))
+                            }
+                        };
+
+                        if query.matches(&document) {
+                            documents.push(json!({
+                                "id": String::from_utf8(key.to_vec()).unwrap(),
+                                "body": document,
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(warp::reply::with_status(
+                            format!("Database error: {:?}", e),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ))
+                    }
                 }
             }
         }
@@ -143,6 +204,28 @@ fn get_value_from_doc(doc: Value, parts: &[String]) -> Value {
         current = value.unwrap();
     }
     current.clone()
+}
+
+fn get_path_values(document: &Value, path: String) -> Vec<String> {
+    let mut path_values = Vec::new();
+    let doc = document.as_object().unwrap();
+    for (key, value) in doc.into_iter() {
+        match value {
+            Value::Object(inner_map) => {
+                let new_path = format!("{}.{}", path, key);
+                path_values.extend(get_path_values(&json!(inner_map), new_path));
+            }
+            Value::Array(_) => {
+                continue;
+            }
+            _ => {
+                let key = format!("{}.{}", path, key);
+                path_values.push(format!("{}:{}", key, value));
+            }
+        }
+    }
+
+    path_values
 }
 
 #[derive(Debug)]
