@@ -2,6 +2,8 @@
 
 ## What
 A toy document-oriented DB implemented in Rust.
+It supports Lucene-like (elasticsearch-like) filtering queries.
+It uses `RocksDB` as a storage engine.
 
 ## Run
 Launch server at `localhost:8080`.
@@ -34,3 +36,5 @@ jq ".count"  0.05s user 0.00s system 27% cpu 0.173 total
     - https://notes.eatonphil.com/documentdb.html
     - Elasticsearch: https://www.elastic.co/jp/
     - Lucene: https://lucene.apache.org/
+- RocksDB
+    - https://rocksdb.org/
