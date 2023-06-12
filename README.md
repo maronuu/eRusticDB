@@ -6,17 +6,22 @@ It supports Lucene-like (elasticsearch-like) filtering queries.
 It uses `RocksDB` as a storage engine.
 
 ## Run
+
+### Launch server
 Launch server at `localhost:8080`.
 ```bash
 cargo run
 ```
 
-Add many entries into DB. You can `ctrl+C` at any time. 
+### Send requests
+- Download `wikipedia-movie-data` from [here](https://github.com/prust/wikipedia-movie-data/blob/master/movies.json).
+
+- Add many entries into DB. You can `ctrl+C` at any time. 
 ```bash
 ./test.sh
 ```
 
-Search documents.
+- Search documents with conditions.
 ```bash
 # all docs
 $ time curl -s --get http://localhost:8080/docs | jq ".count"
