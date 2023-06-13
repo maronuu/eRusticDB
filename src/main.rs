@@ -32,12 +32,32 @@ impl Server {
         let path_values = get_path_values(&document, "".to_string());
 
         for path_value in path_values {
-            let mut index_key = path_value.clone();
-            index_key.push_str(":");
-            index_key.push_str(&id);
-            let write_options = rocksdb::WriteOptions::default();
-            db.put_opt(index_key, "".to_string(), &write_options)
-                .unwrap();
+            let index_key = path_value.clone();
+            // read existing posting list
+            let read_options = rocksdb::ReadOptions::default();
+            let ids = db.get_opt(index_key.clone(), &read_options).unwrap();
+            match ids {
+                None => {
+                    // create new entry
+                    let ids = vec![id.clone()];
+                    let ids = ids.join(",");
+                    // write to db
+                    let write_options = rocksdb::WriteOptions::default();
+                    db.put_opt(index_key, ids, &write_options).unwrap();
+                }
+                Some(ids) => {
+                    // append to existing entry
+                    let ids = String::from_utf8(ids).unwrap();
+                    let ids = ids.split(",").collect::<Vec<&str>>();
+                    let mut ids = ids.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+                    // add new entry
+                    ids.push(id.clone());
+                    let ids = ids.join(",");
+                    // write to db
+                    let write_options = rocksdb::WriteOptions::default();
+                    db.put_opt(index_key, ids, &write_options).unwrap();
+                }
+            }
         }
     }
 
@@ -117,7 +137,7 @@ impl Server {
                 let index_key = cond.key.clone() + ":" + &cond.value;
                 let ids = self.index_db.get(index_key).unwrap();
                 let ids = String::from_utf8(ids.unwrap()).unwrap();
-                let ids: Vec<&str> = ids.split(":").collect();
+                let ids: Vec<&str> = ids.split(",").collect();
                 let ids = ids.iter().map(|s| s.to_string()).collect::<Vec<String>>();
                 for id in ids {
                     let cnt = doc2cnt.entry(id).or_insert(0);
@@ -207,6 +227,7 @@ fn get_value_from_doc(doc: Value, parts: &[String]) -> Value {
 }
 
 fn get_path_values(document: &Value, path: String) -> Vec<String> {
+    // each path_values is a string of the form "path:value"
     let mut path_values = Vec::new();
     let doc = document.as_object().unwrap();
     for (key, value) in doc.into_iter() {
@@ -216,6 +237,7 @@ fn get_path_values(document: &Value, path: String) -> Vec<String> {
                 path_values.extend(get_path_values(&json!(inner_map), new_path));
             }
             Value::Array(_) => {
+                // not supported
                 continue;
             }
             _ => {
