@@ -136,12 +136,21 @@ impl Server {
                 non_range_args += 1;
                 let index_key = cond.key.clone() + ":" + &cond.value;
                 let ids = self.index_db.get(index_key).unwrap();
-                let ids = String::from_utf8(ids.unwrap()).unwrap();
-                let ids: Vec<&str> = ids.split(",").collect();
-                let ids = ids.iter().map(|s| s.to_string()).collect::<Vec<String>>();
-                for id in ids {
-                    let cnt = doc2cnt.entry(id).or_insert(0);
-                    *cnt += 1;
+                match ids {
+                    None => {
+                        // no match
+                        continue;
+                    }
+                    Some(ids) => {
+                        // match
+                        let ids = String::from_utf8(ids).unwrap();
+                        let ids: Vec<&str> = ids.split(",").collect();
+                        let ids = ids.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+                        for id in ids {
+                            let cnt = doc2cnt.entry(id).or_insert(0);
+                            *cnt += 1;
+                        }
+                    }
                 }
             } else {
                 is_range = true;
@@ -288,12 +297,9 @@ impl Query {
             }
             let matches = match condition.op.as_str() {
                 "=" => {
-                    if value.is_string() {
-                        value.as_str().unwrap() == condition.value
-                    } else {
-                        // only supports string match
-                        return false;
-                    }
+                    let lhs = value.to_string();
+                    let rhs = condition.value.clone();
+                    lhs == rhs
                 }
                 // only supports int comparison
                 ">" => {
